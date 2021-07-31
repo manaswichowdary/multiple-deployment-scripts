@@ -1,11 +1,137 @@
-FROM tomcat:8-jre11
-LABEL "Project"="Vprofile"
-LABEL "Author"="Imran"
+$orgUrl = "https://dev.azure.com/aartics26"
+$personalToken = "xaccgeb7ik6qwrvd6ey7n3lvlztstevj55wncgkk5uqprxs4smwq"
 
-RUN rm -rf /usr/local/tomcat/webapps/*
-COPY target/vprofile-v2.war /usr/local/tomcat/webapps/ROOT.war
+function GetUrl() {
+    param(
+        [string]$orgUrl, 
+        [hashtable]$header, 
+        [string]$AreaId
+    )
 
-EXPOSE 8080
-CMD ["catalina.sh", "run"]
-WORKDIR /usr/local/tomcat/
-VOLUME /usr/local/tomcat/webapps
+    # Area ids
+    # https://docs.microsoft.com/en-us/azure/devops/extend/develop/work-with-urls?view=azure-devops&tabs=http&viewFallbackFrom=vsts#resource-area-ids-reference
+    # Build the URL for calling the org-level Resource Areas REST API for the RM APIs
+    $orgResourceAreasUrl = [string]::Format("{0}/_apis/resourceAreas/{1}?api-preview=5.0-preview.1", $orgUrl, $AreaId)
+
+    # Do a GET on this URL (this returns an object with a "locationUrl" field)
+    $results = Invoke-RestMethod -Uri $orgResourceAreasUrl -Headers $header
+
+    # The "locationUrl" field reflects the correct base URL for RM REST API calls
+    if ("null" -eq $results) {
+        $areaUrl = $orgUrl
+    }
+    else {
+        $areaUrl = $results.locationUrl
+    }
+
+    return $areaUrl
+}
+
+
+
+
+Write-Host "Initialize authentication context" -ForegroundColor Yellow
+$token = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(":$($personalToken)"))
+$header = @{authorization = "Basic $token"}
+
+ 
+# DEMO 1 List of projects
+Write-Host "Demo 1-List of projects"
+$coreAreaId = "79134c72-4a58-4b42-976c-04e7115f32bf"
+$tfsBaseUrl = GetUrl -orgUrl $orgUrl -header $header -AreaId $coreAreaId
+
+# https://docs.microsoft.com/en-us/rest/api/azure/devops/core/projects/list?view=azure-devops-rest-5.1
+$projectsUrl = "$($tfsBaseUrl)_apis/projects?api-version=5.1"
+$projects = Invoke-RestMethod -Uri $projectsUrl -Method Get -ContentType "application/json" -Headers $header
+
+$projects.value | ForEach-Object {
+    Write-Host $_.name
+}
+
+
+# DEMO 2 List of Build definitions
+Write-Host "Demo 2-List of Build definitions"
+$projects.value | ForEach-Object {
+    $project = $_.name
+    $buildManagementAreaId = "5d6898bb-45ec-463f-95f9-54d49c71752e"
+    $tfsBaseUrl = GetUrl -orgUrl $orgUrl -header $header -AreaId $buildManagementAreaId
+    $buildDefUrl = "$tfsBaseUrl/$project//_apis/build/definitions?api-version=5.1"
+    $result = Invoke-RestMethod $buildDefUrl -Method Get -ContentType "application/json" -Headers $header
+    $buildDefs = $result.value
+    
+    if($buildDefs.count -gt 0){
+        Write-Host "$project $($buildDefs.count) build def founds" -ForegroundColor Blue
+        $buildDefs | ForEach-Object {
+            Write-host "`t$($_.name)" -ForegroundColor Green
+        }
+    }
+}
+
+# DEMO 3 List of release definitions
+Write-Host "Demo 3-List of release definitions"
+$projects.value | ForEach-Object {
+    $project = $_.name
+    $releaseManagementAreaId = "efc2f575-36ef-48e9-b672-0c6fb4a48ac5"
+    $tfsBaseUrl = GetUrl -orgUrl $orgUrl -header $header -AreaId $releaseManagementAreaId
+    # https://docs.microsoft.com/en-us/rest/api/azure/devops/release/definitions/list?view=azure-devops-rest-5.1
+    $relDefUrl = "$tfsBaseUrl/$project/_apis/release/definitions?api-version=5.1"
+    $result = Invoke-RestMethod $relDefUrl -Method Get -ContentType "application/json" -Headers $header
+    $relDefs = $result.value
+    
+    if($relDefs.count -gt 0){
+        Write-Host "$project $($relDefs.count) release def founds" -ForegroundColor Blue
+        $relDefs | ForEach-Object {
+            Write-host "`t$($_.name)" -ForegroundColor Green
+        }
+    }
+}
+
+# DEMO 4 Use build id and queue the build
+Write-Host "Demo 4--Use build id and queue the build"
+$projects.value | ForEach-Object {
+$body = '
+{ 
+        "definition": {
+            "id": 1
+        } 
+}
+'
+$bodyJson=$body | ConvertFrom-Json
+Write-Output $bodyJson
+$bodyString=$bodyJson | ConvertTo-Json -Depth 100
+
+    $project = $_.name
+    $buildManagementAreaId = "5d6898bb-45ec-463f-95f9-54d49c71752e"
+    $tfsBaseUrl = GetUrl -orgUrl $orgUrl -header $header -AreaId $buildManagementAreaId
+    $buildDefUrl = "$tfsBaseUrl/$project//_apis/build/builds?api-version=5.1"
+    $result = Invoke-RestMethod -Method Post -ContentType "application/json" $buildDefUrl -Body $bodyString -Headers $header
+    $buildDefs = $result.value 
+	Write-Output $bodyString
+    Write-Host "build completed"
+  
+}
+
+
+# DEMO 5 Create Release
+Write-Host "DEMO 5 Create Release"
+$projects.value | ForEach-Object {
+$body1 = '
+{ "definitionId": 1,
+  "description": "Creating dev release",
+  "isDraft": "false",
+  "reason": "none",
+  "manualEnvironments": "dev"
+}'
+$bodyJson1=$body1 | ConvertFrom-Json
+Write-Output $bodyJson1
+$bodyString1=$bodyJson1 | ConvertTo-Json -Depth 100
+Write-Output $bodyString1
+    $project = $_.name
+    $releaseManagementAreaId = "efc2f575-36ef-48e9-b672-0c6fb4a48ac5"
+    $tfsBaseUrl = GetUrl -orgUrl $orgUrl -header $header -AreaId $releaseManagementAreaId
+    $ReleaseDefUrl = "$tfsBaseUrl/$project//_apis/release/releases?api-version=5.1"
+    $result1 = Invoke-RestMethod -Method Post -ContentType "application/json" $ReleaseDefUrl -Body $bodyString1 -Headers $header
+    $ReleaseDef = $result1.value 
+    Write-Host "Release completed"
+}
+
